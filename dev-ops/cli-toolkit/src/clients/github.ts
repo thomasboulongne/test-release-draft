@@ -47,6 +47,7 @@ export async function runReleasePreview(targetBranch: string, opts: CliOpts) {
       ref: targetBranch,
       inputs: {
         'test-run': String(opts.testMode),
+        commitish: targetBranch,
       },
     }),
     {

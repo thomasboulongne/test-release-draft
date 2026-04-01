@@ -30,7 +30,7 @@ jobs:
 
       - name: Draft web-app Release
         id: draft-web-app
-        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish }}"
+        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish || github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_OWNER: ${{ github.repository_owner }}
