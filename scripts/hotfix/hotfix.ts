@@ -266,6 +266,13 @@ async function main() {
       const stagedBranch = `staged/${sha}/${releaseBranch}`;
       createdBranches.push(stagedBranch);
 
+      try {
+        git(`push origin --delete ${stagedBranch}`);
+        console.log(`   Cleaned up pre-existing staged branch`);
+      } catch {
+        // doesn't exist — expected
+      }
+
       git(`checkout ${hotfixBranch}`);
       git(`checkout -b ${stagedBranch}`);
       git(`cherry-pick ${sha}`);
