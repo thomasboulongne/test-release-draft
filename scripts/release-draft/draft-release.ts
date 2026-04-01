@@ -296,11 +296,31 @@ async function main() {
   const prefixReleases = releases.filter((r) => r.tag_name.startsWith(prefix));
   const published = prefixReleases.filter((r) => !r.draft);
 
-  // Find the correct base: the most recent published NON-hotfix release
-  const baseRelease = published.find((r) => !isHotfixRelease(r));
-  const hotfixesBetween = baseRelease
-    ? published.slice(0, published.indexOf(baseRelease)).filter(isHotfixRelease)
-    : [];
+  // Detect if this is a hotfix branch and find the appropriate base
+  const isHotfixBranch = commitish.startsWith('hotfix/');
+  let baseRelease: GitHubRelease | undefined;
+  let hotfixesBetween: GitHubRelease[] = [];
+
+  if (isHotfixBranch) {
+    // For hotfix branches (hotfix/release/YYYY-MM-DD-HH-MM), the base is the
+    // release targeting the original release branch
+    const releaseBranch = commitish.replace(/^hotfix\//, '');
+    console.log(`Hotfix detected — looking for release targeting ${releaseBranch}`);
+    baseRelease = published.find(
+      (r) => r.target_commitish === releaseBranch && !isHotfixRelease(r)
+    );
+    if (!baseRelease) {
+      baseRelease = published.find((r) => r.target_commitish === releaseBranch);
+    }
+  }
+
+  if (!baseRelease) {
+    // Standard flow: most recent published non-hotfix release
+    baseRelease = published.find((r) => !isHotfixRelease(r));
+    hotfixesBetween = baseRelease
+      ? published.slice(0, published.indexOf(baseRelease)).filter(isHotfixRelease)
+      : [];
+  }
 
   if (!baseRelease) {
     console.error(`No published non-hotfix release found for prefix "${prefix}"`);
@@ -315,8 +335,10 @@ async function main() {
     );
   }
 
-  // Compare commits
-  const comparison = await compareCommits(baseRelease.tag_name, commitish);
+  // For hotfix branches, compare against the release branch (not the tag)
+  // to get only the cherry-picked commits
+  const compareBase = isHotfixBranch ? baseRelease.target_commitish : baseRelease.tag_name;
+  const comparison = await compareCommits(compareBase, commitish);
   console.log(
     `Found ${comparison.total_commits} commits (${comparison.commits.length} returned by API)`
   );
