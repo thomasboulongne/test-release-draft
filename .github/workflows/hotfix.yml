@@ -39,7 +39,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.ORG_GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -62,6 +62,6 @@ jobs:
             ${{ github.event.inputs.skip-release-preview == 'true' && '--skip-release-preview' || '' }} \
             ${{ github.event.inputs.dry-run == 'true' && '--dry-run' || '' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
           GITHUB_OWNER: ${{ github.repository_owner }}
           GITHUB_REPO: ${{ github.event.repository.name }}

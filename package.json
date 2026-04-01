@@ -1,0 +1,21 @@
+{
+  "name": "test-release-draft",
+  "private": true,
+  "scripts": {
+    "release:doctor": "npx tsx --env-file=.env dev-ops/release-doctor-cli/index.ts",
+    "release:doctor:test": "npx tsx --env-file=.env dev-ops/release-doctor-cli/index.ts --test-mode",
+    "draft:release": "npx tsx --env-file=.env scripts/release-draft/draft-release.ts"
+  },
+  "dependencies": {
+    "@inquirer/checkbox": "^4.0.4",
+    "@inquirer/confirm": "^3.1.5",
+    "@inquirer/core": "^8.0.1",
+    "@inquirer/input": "^2.1.5",
+    "@inquirer/select": "^2.3.1",
+    "@octokit/rest": "^21.0.2",
+    "chalk": "^4.1.2",
+    "commander": "^12.0.0",
+    "ora": "^8.0.1",
+    "tsx": "^4.0.0"
+  }
+}
