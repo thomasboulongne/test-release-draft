@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       commitish:
-        description: 'Branch or ref to draft from (defaults to the dispatched branch)'
+        description: 'Override branch to draft from (used by hotfix action)'
         type: string
         default: ''
       test-run:
@@ -16,7 +16,32 @@ permissions:
   contents: write
 
 jobs:
+  release-branch:
+    name: Create Release Branch
+    runs-on: ubuntu-latest
+    outputs:
+      branch_name: ${{ steps.branch.outputs.branch_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create Release Branch
+        if: ${{ github.event.inputs.commitish == '' && github.event.inputs.test-run != 'true' }}
+        run: |
+          BRANCH="release/$(date -u +%Y-%m-%d-%H-%M)"
+          echo "Creating release branch: $BRANCH"
+          git checkout -b "$BRANCH"
+          git push origin "$BRANCH"
+
+      - name: Get Branch Name
+        if: ${{ always() }}
+        id: branch
+        run: |
+          echo "branch_name=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
+
   draft-release:
+    needs: [release-branch]
     name: Draft Release
     runs-on: ubuntu-latest
     steps:
@@ -33,7 +58,7 @@ jobs:
 
       - name: Draft web-app Release
         id: draft-web-app
-        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish || github.ref_name }}"
+        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish || needs.release-branch.outputs.branch_name || github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_OWNER: ${{ github.repository_owner }}
