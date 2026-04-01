@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       commitish:
-        description: 'Branch or ref to draft from'
+        description: 'Branch or ref to draft from (defaults to the dispatched branch)'
         type: string
-        default: 'main'
+        default: ''
       test-run:
         description: 'Test Run (skip side effects)'
         type: boolean
