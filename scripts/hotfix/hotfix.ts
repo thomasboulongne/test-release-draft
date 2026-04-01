@@ -243,6 +243,14 @@ async function main() {
   // 4. Create hotfix branch from the release branch
   console.log('\n🔀 Creating hotfix branch...');
   const hotfixBranch = `hotfix/${releaseBranch}`;
+
+  try {
+    git(`push origin --delete ${hotfixBranch}`);
+    console.log(`   Cleaned up pre-existing remote branch: ${hotfixBranch}`);
+  } catch {
+    // Branch doesn't exist remotely — expected for fresh hotfixes
+  }
+
   git(`checkout ${releaseBranch}`);
   git(`checkout -b ${hotfixBranch}`);
   git(`push origin ${hotfixBranch}`);
