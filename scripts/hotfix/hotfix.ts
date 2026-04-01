@@ -294,40 +294,6 @@ async function main() {
       git(`reset --hard origin/${hotfixBranch}`);
     }
 
-    // 6. Trigger release-preview
-    if (!skipReleasePreview) {
-      console.log('\n🚀 Triggering release-preview workflow...');
-      await dispatchWorkflow('release-preview.yml', hotfixBranch, {
-        'test-run': 'false',
-        commitish: hotfixBranch,
-      });
-      console.log('   ✓ Workflow dispatched');
-    } else {
-      console.log('\n⏭️  Skipping release-preview (--skip-release-preview)');
-    }
-
-    console.log('\n🎉 Hotfix applied successfully!');
-    console.log(`   Branch: ${hotfixBranch}`);
-    console.log(
-      `   Compare: https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch}`
-    );
-
-    setOutput('hotfix_branch', hotfixBranch);
-    setOutput('status', 'success');
-
-    summary('### 🛠️ Hotfix Applied');
-    summary('');
-    summary(`**Release:** ${releaseTag}`);
-    summary(`**Branch:** \`${hotfixBranch}\``);
-    summary(`**Commits:**`);
-    for (const sha of commits) {
-      const title = getCommitTitle(sha);
-      summary(`- \`${sha.slice(0, 8)}\` ${title}`);
-    }
-    summary('');
-    summary(
-      `[Compare changes](https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch})`
-    );
   } catch (err) {
     console.error('\n❌ Hotfix failed:', err);
     setOutput('status', 'failed');
@@ -336,6 +302,51 @@ async function main() {
     await cleanupBranches(createdBranches);
 
     process.exit(1);
+  }
+
+  // 6. Trigger release-preview (outside try/catch — hotfix already succeeded)
+  console.log('\n🎉 Hotfix applied successfully!');
+  console.log(`   Branch: ${hotfixBranch}`);
+  console.log(
+    `   Compare: https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch}`
+  );
+
+  setOutput('hotfix_branch', hotfixBranch);
+  setOutput('status', 'success');
+
+  summary('### 🛠️ Hotfix Applied');
+  summary('');
+  summary(`**Release:** ${releaseTag}`);
+  summary(`**Branch:** \`${hotfixBranch}\``);
+  summary(`**Commits:**`);
+  for (const sha of commits) {
+    const title = getCommitTitle(sha);
+    summary(`- \`${sha.slice(0, 8)}\` ${title}`);
+  }
+  summary('');
+  summary(
+    `[Compare changes](https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch})`
+  );
+
+  if (!skipReleasePreview) {
+    console.log('\n🚀 Triggering release-preview workflow...');
+    try {
+      await dispatchWorkflow('release-preview.yml', hotfixBranch, {
+        'test-run': 'false',
+        commitish: hotfixBranch,
+      });
+      console.log('   ✓ Workflow dispatched');
+    } catch (err) {
+      console.warn(
+        '\n⚠️  Could not trigger release-preview automatically:',
+        (err as Error).message
+      );
+      console.log(
+        `   You can trigger it manually: https://github.com/${OWNER}/${REPO}/actions/workflows/release-preview.yml`
+      );
+    }
+  } else {
+    console.log('\n⏭️  Skipping release-preview (--skip-release-preview)');
   }
 }
 
