@@ -165,14 +165,21 @@ function isHotfixRelease(release: GitHubRelease): boolean {
   const body = release.body ?? '';
   if (/PR Generated via Release Doctor CLI/i.test(body)) signals.push('body-doctor');
   if (/hotfix for release branch/i.test(body)) signals.push('body-hotfix');
-  if (/^\s*\*.*hotfix\(/im.test(body)) signals.push('bullet-hotfix');
+  if (/Hotfix GitHub Action/i.test(body)) signals.push('body-action');
 
   const bulletCount = (body.match(/^\s*\*/gm) || []).length;
   if (bulletCount > 0 && bulletCount <= HOTFIX_COMMIT_THRESHOLD) {
     signals.push('low-commits');
   }
 
-  const strongSignal = signals.some((s) => s !== 'low-commits');
+  // 'branch' and 'tag' are definitive signals
+  // 'body-doctor', 'body-hotfix', 'body-action' are strong contextual signals
+  // 'low-commits' alone is weak — needs a second signal
+  // bullet content (hotfix(...) in titles) is NOT a signal because normal
+  // releases can include hotfix-titled commits that landed on main
+  const strongSignal = signals.some(
+    (s) => s === 'branch' || s === 'tag' || s === 'body-doctor' || s === 'body-hotfix' || s === 'body-action'
+  );
   return strongSignal || signals.length >= 2;
 }
 
