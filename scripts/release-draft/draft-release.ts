@@ -187,8 +187,6 @@ function isHotfixRelease(release: GitHubRelease): boolean {
 // Version resolution
 // ---------------------------------------------------------------------------
 
-const MAJOR_LABELS = ['feat', 'feature', 'perf'];
-
 function parseVersion(tagName: string, prefix: string): { major: number; minor: number } {
   const versionStr = tagName.slice(prefix.length);
   const [major, minor] = versionStr.split('.').map(Number);
@@ -216,11 +214,7 @@ function resolveNextVersion(
     return `${baseMajor}.${highestMinor + 1}`;
   }
 
-  const hasMajor = commits.some((c) =>
-    MAJOR_LABELS.some((label) => c.title.toLowerCase().startsWith(label))
-  );
-
-  return hasMajor ? `${highestMajor + 1}.0` : `${highestMajor + 1}.0`;
+  return `${highestMajor + 1}.0`;
 }
 
 // ---------------------------------------------------------------------------
