@@ -200,22 +200,27 @@ type Commit = { title: string; body: string; authorTag: string };
 function resolveNextVersion(
   allPrefixReleases: GitHubRelease[],
   prefix: string,
-  commits: Commit[]
+  commits: Commit[],
+  isHotfix: boolean,
+  baseRelease?: GitHubRelease
 ): string {
   const publishedReleases = allPrefixReleases.filter((r) => !r.draft);
-  const highestMajor = publishedReleases.reduce((max, r) => {
-    const v = parseVersion(r.tag_name, prefix);
-    return Math.max(max, v.major);
-  }, 0);
+  const versions = publishedReleases.map((r) => parseVersion(r.tag_name, prefix));
+  const highestMajor = versions.reduce((max, v) => Math.max(max, v.major), 0);
+
+  if (isHotfix && baseRelease) {
+    const baseMajor = parseVersion(baseRelease.tag_name, prefix).major;
+    const highestMinor = versions
+      .filter((v) => v.major === baseMajor)
+      .reduce((max, v) => Math.max(max, v.minor), 0);
+    return `${baseMajor}.${highestMinor + 1}`;
+  }
 
   const hasMajor = commits.some((c) =>
     MAJOR_LABELS.some((label) => c.title.toLowerCase().startsWith(label))
   );
 
-  if (hasMajor) {
-    return `${highestMajor + 1}.0`;
-  }
-  return `${highestMajor}.${1}`;
+  return hasMajor ? `${highestMajor + 1}.0` : `${highestMajor + 1}.0`;
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +372,7 @@ async function main() {
   }
 
   // Compute version and generate notes
-  const nextVersion = resolveNextVersion(prefixReleases, prefix, commits);
+  const nextVersion = resolveNextVersion(prefixReleases, prefix, commits, isHotfixBranch, baseRelease);
   const tagName = `${prefix}${nextVersion}`;
   const releaseName = tagName;
   const releaseBody = commitsToReleaseNotes(commits);
