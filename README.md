@@ -4,3 +4,4 @@ feature B
 fix
 dashboard
 refactor
+bugfix
