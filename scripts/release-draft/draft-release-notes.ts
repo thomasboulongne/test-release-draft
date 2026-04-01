@@ -1,12 +1,14 @@
 /* eslint-disable no-console */
 /**
- * Takes a list of commits and outputs a markdown draft of release notes in
- * the style of release-drafter
+ * Formats a list of parsed commits into categorized markdown release notes.
  *
- * Output:
- * ## <Section>:
+ * Categorization is based on conventional commit prefixes (feat, fix, chore,
+ * etc.) matching the rules previously defined in the release-drafter YAML
+ * configs. Each commit line includes Jira ticket links and author attribution.
  *
- * * <commit w/ jira link> <pr> <author>
+ * Used by:
+ *  - scripts/release-draft/draft-release.ts (CI release drafting)
+ *  - dev-ops/release-doctor-cli/src/release-notes.ts (interactive note fixer)
  */
 
 const SECTIONS = [
