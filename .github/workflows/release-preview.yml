@@ -7,6 +7,10 @@ on:
         description: 'Branch or ref to draft from'
         type: string
         default: 'main'
+      test-run:
+        description: 'Test Run (skip side effects)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
