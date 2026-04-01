@@ -1,2 +1,3 @@
 # Test Release Draft
 feature A
+feature B
