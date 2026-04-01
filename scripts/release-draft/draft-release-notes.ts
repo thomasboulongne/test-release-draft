@@ -112,5 +112,8 @@ function linkJira(title: string): string {
 
 function prependAuthorToPR(title: string, author: string) {
   const lastIndex = title.lastIndexOf(' (#');
+  if (lastIndex === -1) {
+    return `${title} @${author}`;
+  }
   return `${title.slice(0, lastIndex)} @${author}${title.slice(lastIndex)}`;
 }
