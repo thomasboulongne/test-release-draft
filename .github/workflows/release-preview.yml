@@ -1,0 +1,38 @@
+name: Release Preview (Test)
+
+on:
+  workflow_dispatch:
+    inputs:
+      commitish:
+        description: 'Branch or ref to draft from'
+        type: string
+        default: 'main'
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    name: Draft Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Draft web-app Release
+        id: draft-web-app
+        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPO: ${{ github.event.repository.name }}
+
+      - name: Summary
+        run: |
+          echo "### Draft Release" >> $GITHUB_STEP_SUMMARY
+          echo "**Tag:** ${{ steps.draft-web-app.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
