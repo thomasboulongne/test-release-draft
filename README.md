@@ -7,3 +7,5 @@ refactor
 bugfix
 
 Test 1 update
+
+Test 2
