@@ -1,0 +1,67 @@
+name: Hotfix Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release-tag:
+        description: 'Release tag to hotfix (e.g. @frameio/next-web-app@522.0)'
+        required: true
+        type: string
+      commits:
+        description: 'Comma-separated commit SHAs from main to cherry-pick'
+        required: true
+        type: string
+      skip-release-preview:
+        description: 'Skip triggering release-preview after hotfix'
+        type: boolean
+        default: false
+      dry-run:
+        description: 'Validate inputs without making changes'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: hotfix-${{ github.event.inputs.release-tag }}
+  cancel-in-progress: false
+
+jobs:
+  hotfix:
+    name: Apply Hotfix
+    runs-on: ubuntu-latest
+    outputs:
+      hotfix_branch: ${{ steps.hotfix.outputs.hotfix_branch }}
+      status: ${{ steps.hotfix.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Run Hotfix
+        id: hotfix
+        run: |
+          npx tsx scripts/hotfix/hotfix.ts \
+            --release-tag "${{ github.event.inputs.release-tag }}" \
+            --commits "${{ github.event.inputs.commits }}" \
+            ${{ github.event.inputs.skip-release-preview == 'true' && '--skip-release-preview' || '' }} \
+            ${{ github.event.inputs.dry-run == 'true' && '--dry-run' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPO: ${{ github.event.repository.name }}
