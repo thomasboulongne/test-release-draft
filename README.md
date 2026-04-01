@@ -2,3 +2,4 @@
 feature A
 feature B
 fix
+dashboard
