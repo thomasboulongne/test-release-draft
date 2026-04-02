@@ -13,5 +13,7 @@ max_connections=100
 cache_ttl=3600
 rate_limit_window=60s
 ## Monitoring
-health_check_interval=30s
-alert_threshold=95
+health_check_interval=15s
+alert_threshold=90
+cpu_alert_threshold=80
+memory_alert_threshold=85
