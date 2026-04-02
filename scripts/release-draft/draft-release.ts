@@ -240,23 +240,44 @@ function resolveNextVersion(
 // Commit parsing
 // ---------------------------------------------------------------------------
 
-function parseCommits(raw: CompareCommit[]): Commit[] {
-  return raw.map((c) => {
+/**
+ * Strip the `hotfix(release/...): ` wrapper that squash-merge commits from
+ * the conflict-resolution PR path carry.  Also strips `[CONFLICTS]` suffix.
+ */
+function unwrapHotfixTitle(title: string): string {
+  return title
+    .replace(/^(?:⚠️\s*)?hotfix\(release\/[^)]+\):\s*/i, '')
+    .replace(/\s*\[CONFLICTS\]\s*$/i, '')
+    .trim();
+}
+
+function isMergePRCommit(title: string): boolean {
+  return /^Merge pull request #\d+/i.test(title);
+}
+
+function parseCommits(raw: CompareCommit[], isHotfix: boolean): Commit[] {
+  return raw.reduce<Commit[]>((acc, c) => {
     const titleBreak = c.commit.message.indexOf('\n');
-    const title =
+    let title =
       titleBreak === -1
         ? c.commit.message
         : c.commit.message.slice(0, titleBreak);
     const body =
       titleBreak === -1 ? '' : c.commit.message.slice(titleBreak + 1);
-    return {
+
+    if (isHotfix) {
+      if (isMergePRCommit(title)) return acc;
+      title = unwrapHotfixTitle(title);
+    }
+
+    acc.push({
       authorTag: c.author?.login || 'unknown',
       title,
       body,
-    };
-  });
+    });
+    return acc;
+  }, []);
 }
-
 
 // ---------------------------------------------------------------------------
 // Hotfix commit filtering
@@ -393,7 +414,7 @@ async function main() {
   }
 
   // Parse and filter
-  const allCommits = parseCommits(comparison.commits);
+  const allCommits = parseCommits(comparison.commits, isHotfixBranch);
 
   const commits = excludeHotfixCommits(allCommits, hotfixesBetween);
 

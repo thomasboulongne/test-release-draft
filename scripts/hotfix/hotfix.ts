@@ -1,9 +1,14 @@
 /* eslint-disable no-console */
 /**
  * Headless hotfix script for CI — applies hotfix commit(s) to a release branch
- * via cherry-pick + PR, then triggers release-preview to cut a new release.
+ * via direct cherry-pick, then triggers release-preview to cut a new release.
  *
- * Replaces the interactive release-doctor-cli hotfix flow for CI use.
+ * Happy path: cherry-picks land directly on the hotfix branch (preserving
+ * the original commit message), no intermediate PRs.
+ *
+ * Conflict path: if a cherry-pick fails, the commit with conflict markers is
+ * pushed to a staged branch and a PR is created for manual resolution. Once
+ * resolved and merged, the dashboard auto-triggers release-preview.
  *
  * Usage (CI):
  *   npx tsx scripts/hotfix/hotfix.ts \
@@ -109,13 +114,6 @@ async function createPullRequest(
   });
 }
 
-async function mergePullRequest(prNumber: number): Promise<void> {
-  await ghApi(`/repos/${OWNER}/${REPO}/pulls/${prNumber}/merge`, {
-    method: 'PUT',
-    body: JSON.stringify({ merge_method: 'squash' }),
-  });
-}
-
 async function addPRComment(prNumber: number, body: string): Promise<void> {
   await ghApi(`/repos/${OWNER}/${REPO}/issues/${prNumber}/comments`, {
     method: 'POST',
@@ -159,32 +157,19 @@ function getConflictedFiles(): string[] {
 }
 
 /**
- * Cherry-pick a commit. On conflict, stages everything (including conflict
- * markers) and continues so we can still push and open a PR for manual
- * resolution on GitHub.
- *
- * Returns the list of files that had conflicts (empty if clean).
+ * Attempt a cherry-pick. Returns `true` if clean, `false` if conflict.
+ * On conflict the working tree is left in a conflicted state (not committed).
  */
-function cherryPickWithConflictHandling(sha: string): string[] {
+function tryCherryPick(sha: string): boolean {
   try {
     git(`cherry-pick ${sha}`);
-    return [];
+    return true;
   } catch {
     const conflicted = getConflictedFiles();
     if (conflicted.length === 0) {
       throw new Error(`Cherry-pick of ${sha} failed (not a merge conflict)`);
     }
-
-    console.log(`   ⚠️  Conflict in ${conflicted.length} file(s):`);
-    for (const f of conflicted) console.log(`      - ${f}`);
-
-    git('add -A');
-    execSync('git -c core.editor=true cherry-pick --continue', {
-      encoding: 'utf-8',
-      stdio: 'inherit',
-    });
-
-    return conflicted;
+    return false;
   }
 }
 
@@ -298,92 +283,93 @@ async function main() {
 
   git(`checkout ${releaseBranch}`);
   git(`checkout -b ${hotfixBranch}`);
-  git(`push origin ${hotfixBranch}`);
 
   const createdBranches: string[] = [hotfixBranch];
   const conflictPRs: { sha: string; pr: { number: number; html_url: string }; files: string[] }[] = [];
   let needsResolution = false;
 
   try {
-    // 5. Cherry-pick each commit and merge via PR
+    // 5. Cherry-pick each commit directly onto the hotfix branch
     for (const sha of commits) {
       const title = getCommitTitle(sha);
       console.log(`\n🍒 Cherry-picking: ${title}`);
+
+      git(`checkout ${hotfixBranch}`);
+      const clean = tryCherryPick(sha);
+
+      if (clean) {
+        console.log(`   ✓ Applied cleanly`);
+        continue;
+      }
+
+      // -- Conflict path: abort, use a staged branch + PR for resolution --
+      console.log(`   ⚠️  Conflict detected`);
+      const conflictFiles = getConflictedFiles();
+      console.log(`   Conflicted file(s):`);
+      for (const f of conflictFiles) console.log(`      - ${f}`);
+
+      git('cherry-pick --abort');
 
       const stagedBranch = `staged/${sha}/${releaseBranch}`;
       createdBranches.push(stagedBranch);
 
       try {
         git(`push origin --delete ${stagedBranch}`);
-        console.log(`   Cleaned up pre-existing staged branch`);
-      } catch {
-        // doesn't exist — expected
-      }
+      } catch { /* doesn't exist — expected */ }
 
-      git(`checkout ${hotfixBranch}`);
       git(`checkout -b ${stagedBranch}`);
 
-      const conflictFiles = cherryPickWithConflictHandling(sha);
-      const hasConflict = conflictFiles.length > 0;
+      git(`cherry-pick --no-commit ${sha}`);
+      git('add -A');
+      git(`commit -m "${title}"`);
 
       git(`push origin ${stagedBranch}`);
 
-      console.log('   📝 Creating PR...');
-      const prTitle = hasConflict
-        ? `⚠️ hotfix(${releaseBranch}):${title} [CONFLICTS]`
-        : `hotfix(${releaseBranch}):${title}`;
-
+      console.log('   📝 Creating PR for conflict resolution...');
       const pr = await createPullRequest(
         stagedBranch,
         hotfixBranch,
-        prTitle,
+        `hotfix(${releaseBranch}): ${title} [CONFLICTS]`,
         [
-          `Hotfix for release branch \`${releaseBranch}\``,
-          `Commit applied: \`${sha}\``,
-          `New release target: \`${hotfixBranch}\``,
+          `Hotfix cherry-pick for release branch \`${releaseBranch}\``,
+          `Original commit: \`${sha}\``,
+          `Target: \`${hotfixBranch}\``,
           '',
-          hasConflict
-            ? '⚠️ **This cherry-pick had merge conflicts.** The conflict markers are committed in the branch — please resolve them before merging.'
-            : '',
+          '⚠️ **This cherry-pick had merge conflicts.** The conflict markers are committed — please resolve them before merging.',
+          '',
           '_PR Generated via Hotfix GitHub Action_',
-        ].filter(Boolean).join('\n')
+        ].join('\n')
       );
       console.log(`   PR #${pr.number}: ${pr.html_url}`);
 
-      if (hasConflict) {
-        needsResolution = true;
-        conflictPRs.push({ sha, pr, files: conflictFiles });
+      await addPRComment(pr.number, [
+        '## ⚠️ Cherry-pick conflict — manual resolution required',
+        '',
+        `The cherry-pick of \`${sha}\` onto \`${hotfixBranch}\` produced merge conflicts.`,
+        'The conflict markers have been committed so the PR could be created.',
+        '',
+        '**Conflicted files:**',
+        ...conflictFiles.map((f) => `- \`${f}\``),
+        '',
+        '**To resolve:**',
+        '1. Check out this branch locally, or use GitHub\'s web editor',
+        '2. Search for `<<<<<<<` conflict markers in the files listed above',
+        '3. Resolve each conflict and remove the markers',
+        '4. Commit your resolution and **squash merge** the PR',
+        '',
+        'Once merged, the release dashboard will automatically trigger the release preview.',
+      ].join('\n'));
 
-        await addPRComment(pr.number, [
-          '## ⚠️ Cherry-pick conflict — manual resolution required',
-          '',
-          `The cherry-pick of \`${sha}\` onto \`${hotfixBranch}\` produced merge conflicts.`,
-          'The conflict markers have been committed so the PR could be created.',
-          '',
-          '**Conflicted files:**',
-          ...conflictFiles.map((f) => `- \`${f}\``),
-          '',
-          '**To resolve:**',
-          '1. Check out this branch locally, or use GitHub\'s web editor',
-          '2. Search for `<<<<<<<` conflict markers in the files listed above',
-          '3. Resolve each conflict and remove the markers',
-          '4. Commit your resolution and merge the PR',
-          '',
-          'Once merged, re-trigger the **Hotfix** action (without this commit) to continue, or manually trigger **Release Preview** from the hotfix branch.',
-        ].join('\n'));
+      needsResolution = true;
+      conflictPRs.push({ sha, pr, files: conflictFiles });
 
-        console.log(`   ⚠️  PR left open — engineer must resolve conflicts`);
-        console.log(`   Remaining commits skipped (resolve this conflict first)`);
-        break;
-      }
-
-      console.log('   🔀 Merging PR...');
-      await mergePullRequest(pr.number);
-      console.log(`   ✓ PR #${pr.number} merged`);
-
-      git('fetch origin');
-      git(`reset --hard origin/${hotfixBranch}`);
+      console.log(`   ⚠️  PR left open — engineer must resolve conflicts`);
+      console.log(`   Remaining commits skipped (resolve this conflict first)`);
+      break;
     }
+
+    // Push the hotfix branch with any clean cherry-picks
+    git(`push origin ${hotfixBranch}`);
 
   } catch (err) {
     console.error('\n❌ Hotfix failed:', err);
@@ -417,7 +403,7 @@ async function main() {
       summary(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
     }
     summary('');
-    summary('Resolve the conflicts in the PR(s) above, merge them, then re-trigger the hotfix or release-preview workflow.');
+    summary('Resolve the conflicts in the PR(s) above, merge them, then the release dashboard will auto-trigger release-preview.');
   } else {
     console.log('\n🎉 Hotfix applied successfully!');
     console.log(`   Branch: ${hotfixBranch}`);
