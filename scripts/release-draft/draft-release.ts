@@ -236,6 +236,21 @@ function parseCommits(raw: CompareCommit[]): Commit[] {
 }
 
 // ---------------------------------------------------------------------------
+// Hotfix PR infrastructure commit filtering
+// ---------------------------------------------------------------------------
+
+const HOTFIX_INFRA_PATTERNS = [
+  /^Merge pull request #\d+/i,
+  /^⚠️?\s*hotfix\(release\/.+\):/i,
+  /^fix merge conflict/i,
+  /^resolve merge conflict/i,
+];
+
+function isHotfixInfraCommit(title: string): boolean {
+  return HOTFIX_INFRA_PATTERNS.some((re) => re.test(title));
+}
+
+// ---------------------------------------------------------------------------
 // Hotfix commit filtering
 // ---------------------------------------------------------------------------
 
@@ -356,7 +371,18 @@ async function main() {
   }
 
   // Parse and filter
-  const allCommits = parseCommits(comparison.commits);
+  let allCommits = parseCommits(comparison.commits);
+
+  if (isHotfixBranch) {
+    const before = allCommits.length;
+    allCommits = allCommits.filter((c) => !isHotfixInfraCommit(c.title));
+    if (allCommits.length < before) {
+      console.log(
+        `Filtered ${before - allCommits.length} hotfix infrastructure commit(s) (merge PRs, conflict fixes)`
+      );
+    }
+  }
+
   const commits = excludeHotfixCommits(allCommits, hotfixesBetween);
 
   if (commits.length < allCommits.length) {
