@@ -6,9 +6,10 @@ dashboard
 refactor
 bugfix
 ## Config
-timeout=60
-retries=5
-log_level=info
+timeout=10
+retries=10
+log_level=error
+max_connections=100
 ## Monitoring
 health_check_interval=30s
 alert_threshold=95
