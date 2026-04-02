@@ -6,5 +6,6 @@ dashboard
 refactor
 bugfix
 ## Config
-timeout=30
-retries=3
+timeout=60
+retries=5
+log_level=info
