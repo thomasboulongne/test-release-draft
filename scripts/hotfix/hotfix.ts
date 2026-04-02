@@ -116,6 +116,13 @@ async function mergePullRequest(prNumber: number): Promise<void> {
   });
 }
 
+async function addPRComment(prNumber: number, body: string): Promise<void> {
+  await ghApi(`/repos/${OWNER}/${REPO}/issues/${prNumber}/comments`, {
+    method: 'POST',
+    body: JSON.stringify({ body }),
+  });
+}
+
 async function dispatchWorkflow(
   workflowId: string,
   ref: string,
@@ -141,6 +148,44 @@ function git(cmd: string): string {
 
 function getCommitTitle(sha: string): string {
   return execSync(`git show -s --format=%s ${sha}`, { encoding: 'utf-8' }).trim();
+}
+
+function getConflictedFiles(): string[] {
+  const status = execSync('git status --porcelain', { encoding: 'utf-8' });
+  return status
+    .split('\n')
+    .filter((l) => /^(UU|AA|DD|AU|UA|DU|UD)\s/.test(l))
+    .map((l) => l.slice(3).trim());
+}
+
+/**
+ * Cherry-pick a commit. On conflict, stages everything (including conflict
+ * markers) and continues so we can still push and open a PR for manual
+ * resolution on GitHub.
+ *
+ * Returns the list of files that had conflicts (empty if clean).
+ */
+function cherryPickWithConflictHandling(sha: string): string[] {
+  try {
+    git(`cherry-pick ${sha}`);
+    return [];
+  } catch {
+    const conflicted = getConflictedFiles();
+    if (conflicted.length === 0) {
+      throw new Error(`Cherry-pick of ${sha} failed (not a merge conflict)`);
+    }
+
+    console.log(`   ⚠️  Conflict in ${conflicted.length} file(s):`);
+    for (const f of conflicted) console.log(`      - ${f}`);
+
+    git('add -A');
+    execSync('git -c core.editor=true cherry-pick --continue', {
+      encoding: 'utf-8',
+      stdio: 'inherit',
+    });
+
+    return conflicted;
+  }
 }
 
 function validateCommit(sha: string, targetBranch: string): void {
@@ -256,6 +301,8 @@ async function main() {
   git(`push origin ${hotfixBranch}`);
 
   const createdBranches: string[] = [hotfixBranch];
+  const conflictPRs: { sha: string; pr: { number: number; html_url: string }; files: string[] }[] = [];
+  let needsResolution = false;
 
   try {
     // 5. Cherry-pick each commit and merge via PR
@@ -275,23 +322,60 @@ async function main() {
 
       git(`checkout ${hotfixBranch}`);
       git(`checkout -b ${stagedBranch}`);
-      git(`cherry-pick ${sha}`);
+
+      const conflictFiles = cherryPickWithConflictHandling(sha);
+      const hasConflict = conflictFiles.length > 0;
+
       git(`push origin ${stagedBranch}`);
 
       console.log('   📝 Creating PR...');
+      const prTitle = hasConflict
+        ? `⚠️ hotfix(${releaseBranch}):${title} [CONFLICTS]`
+        : `hotfix(${releaseBranch}):${title}`;
+
       const pr = await createPullRequest(
         stagedBranch,
         hotfixBranch,
-        `hotfix(${releaseBranch}):${title}`,
+        prTitle,
         [
           `Hotfix for release branch \`${releaseBranch}\``,
           `Commit applied: \`${sha}\``,
           `New release target: \`${hotfixBranch}\``,
           '',
+          hasConflict
+            ? '⚠️ **This cherry-pick had merge conflicts.** The conflict markers are committed in the branch — please resolve them before merging.'
+            : '',
           '_PR Generated via Hotfix GitHub Action_',
-        ].join('\n')
+        ].filter(Boolean).join('\n')
       );
       console.log(`   PR #${pr.number}: ${pr.html_url}`);
+
+      if (hasConflict) {
+        needsResolution = true;
+        conflictPRs.push({ sha, pr, files: conflictFiles });
+
+        await addPRComment(pr.number, [
+          '## ⚠️ Cherry-pick conflict — manual resolution required',
+          '',
+          `The cherry-pick of \`${sha}\` onto \`${hotfixBranch}\` produced merge conflicts.`,
+          'The conflict markers have been committed so the PR could be created.',
+          '',
+          '**Conflicted files:**',
+          ...conflictFiles.map((f) => `- \`${f}\``),
+          '',
+          '**To resolve:**',
+          '1. Check out this branch locally, or use GitHub\'s web editor',
+          '2. Search for `<<<<<<<` conflict markers in the files listed above',
+          '3. Resolve each conflict and remove the markers',
+          '4. Commit your resolution and merge the PR',
+          '',
+          'Once merged, re-trigger the **Hotfix** action (without this commit) to continue, or manually trigger **Release Preview** from the hotfix branch.',
+        ].join('\n'));
+
+        console.log(`   ⚠️  PR left open — engineer must resolve conflicts`);
+        console.log(`   Remaining commits skipped (resolve this conflict first)`);
+        break;
+      }
 
       console.log('   🔀 Merging PR...');
       await mergePullRequest(pr.number);
@@ -311,49 +395,73 @@ async function main() {
     process.exit(1);
   }
 
-  // 6. Trigger release-preview (outside try/catch — hotfix already succeeded)
-  console.log('\n🎉 Hotfix applied successfully!');
-  console.log(`   Branch: ${hotfixBranch}`);
-  console.log(
-    `   Compare: https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch}`
-  );
-
-  setOutput('hotfix_branch', hotfixBranch);
-  setOutput('status', 'success');
-
-  summary('### 🛠️ Hotfix Applied');
-  summary('');
-  summary(`**Release:** ${releaseTag}`);
-  summary(`**Branch:** \`${hotfixBranch}\``);
-  summary(`**Commits:**`);
-  for (const sha of commits) {
-    const title = getCommitTitle(sha);
-    summary(`- \`${sha.slice(0, 8)}\` ${title}`);
-  }
-  summary('');
-  summary(
-    `[Compare changes](https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch})`
-  );
-
-  if (!skipReleasePreview) {
-    console.log('\n🚀 Triggering release-preview workflow...');
-    try {
-      await dispatchWorkflow('release-preview.yml', hotfixBranch, {
-        'test-run': 'false',
-        commitish: hotfixBranch,
-      });
-      console.log('   ✓ Workflow dispatched');
-    } catch (err) {
-      console.warn(
-        '\n⚠️  Could not trigger release-preview automatically:',
-        (err as Error).message
-      );
-      console.log(
-        `   You can trigger it manually: https://github.com/${OWNER}/${REPO}/actions/workflows/release-preview.yml`
-      );
+  // 6. Results
+  if (needsResolution) {
+    console.log('\n⚠️  Hotfix requires manual conflict resolution');
+    console.log(`   Branch: ${hotfixBranch}`);
+    for (const { sha, pr, files } of conflictPRs) {
+      console.log(`   PR #${pr.number} (${sha.slice(0, 8)}): ${pr.html_url}`);
+      console.log(`   Conflicted files: ${files.join(', ')}`);
     }
+
+    setOutput('hotfix_branch', hotfixBranch);
+    setOutput('status', 'needs-resolution');
+
+    summary('### ⚠️ Hotfix Needs Manual Resolution');
+    summary('');
+    summary(`**Release:** ${releaseTag}`);
+    summary(`**Branch:** \`${hotfixBranch}\``);
+    summary('');
+    for (const { sha, pr, files } of conflictPRs) {
+      summary(`**Conflict:** \`${sha.slice(0, 8)}\` — [PR #${pr.number}](${pr.html_url})`);
+      summary(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
+    }
+    summary('');
+    summary('Resolve the conflicts in the PR(s) above, merge them, then re-trigger the hotfix or release-preview workflow.');
   } else {
-    console.log('\n⏭️  Skipping release-preview (--skip-release-preview)');
+    console.log('\n🎉 Hotfix applied successfully!');
+    console.log(`   Branch: ${hotfixBranch}`);
+    console.log(
+      `   Compare: https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch}`
+    );
+
+    setOutput('hotfix_branch', hotfixBranch);
+    setOutput('status', 'success');
+
+    summary('### 🛠️ Hotfix Applied');
+    summary('');
+    summary(`**Release:** ${releaseTag}`);
+    summary(`**Branch:** \`${hotfixBranch}\``);
+    summary(`**Commits:**`);
+    for (const sha of commits) {
+      const title = getCommitTitle(sha);
+      summary(`- \`${sha.slice(0, 8)}\` ${title}`);
+    }
+    summary('');
+    summary(
+      `[Compare changes](https://github.com/${OWNER}/${REPO}/compare/${releaseBranch}...${hotfixBranch})`
+    );
+
+    if (!skipReleasePreview) {
+      console.log('\n🚀 Triggering release-preview workflow...');
+      try {
+        await dispatchWorkflow('release-preview.yml', hotfixBranch, {
+          'test-run': 'false',
+          commitish: hotfixBranch,
+        });
+        console.log('   ✓ Workflow dispatched');
+      } catch (err) {
+        console.warn(
+          '\n⚠️  Could not trigger release-preview automatically:',
+          (err as Error).message
+        );
+        console.log(
+          `   You can trigger it manually: https://github.com/${OWNER}/${REPO}/actions/workflows/release-preview.yml`
+        );
+      }
+    } else {
+      console.log('\n⏭️  Skipping release-preview (--skip-release-preview)');
+    }
   }
 }
 
