@@ -46,7 +46,9 @@ function parseArgs() {
   }
 
   if (!prefix || !commitish) {
-    console.error('Usage: --prefix <tag-prefix> --commitish <branch> [--dry-run]');
+    console.error(
+      'Usage: --prefix <tag-prefix> --commitish <branch> [--dry-run]'
+    );
     process.exit(1);
   }
 
@@ -93,7 +95,10 @@ function githubHeaders() {
 const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
 
 async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, { ...init, headers: { ...githubHeaders(), ...init?.headers } });
+  const res = await fetch(url, {
+    ...init,
+    headers: { ...githubHeaders(), ...init?.headers },
+  });
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`GitHub API ${res.status}: ${text}`);
@@ -105,7 +110,10 @@ async function getReleases(perPage: number): Promise<GitHubRelease[]> {
   return fetchJSON<GitHubRelease[]>(`${API}/releases?per_page=${perPage}`);
 }
 
-async function compareCommits(base: string, head: string): Promise<CompareResponse> {
+async function compareCommits(
+  base: string,
+  head: string
+): Promise<CompareResponse> {
   return fetchJSON<CompareResponse>(
     `${API}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`
   );
@@ -163,7 +171,8 @@ function isHotfixRelease(release: GitHubRelease): boolean {
   if (release.tag_name.includes('hotfix')) signals.push('tag');
 
   const body = release.body ?? '';
-  if (/PR Generated via Release Doctor CLI/i.test(body)) signals.push('body-doctor');
+  if (/PR Generated via Release Doctor CLI/i.test(body))
+    signals.push('body-doctor');
   if (/hotfix for release branch/i.test(body)) signals.push('body-hotfix');
   if (/Hotfix GitHub Action/i.test(body)) signals.push('body-action');
 
@@ -178,7 +187,12 @@ function isHotfixRelease(release: GitHubRelease): boolean {
   // bullet content (hotfix(...) in titles) is NOT a signal because normal
   // releases can include hotfix-titled commits that landed on main
   const strongSignal = signals.some(
-    (s) => s === 'branch' || s === 'tag' || s === 'body-doctor' || s === 'body-hotfix' || s === 'body-action'
+    (s) =>
+      s === 'branch' ||
+      s === 'tag' ||
+      s === 'body-doctor' ||
+      s === 'body-hotfix' ||
+      s === 'body-action'
   );
   return strongSignal || signals.length >= 2;
 }
@@ -187,7 +201,10 @@ function isHotfixRelease(release: GitHubRelease): boolean {
 // Version resolution
 // ---------------------------------------------------------------------------
 
-function parseVersion(tagName: string, prefix: string): { major: number; minor: number } {
+function parseVersion(
+  tagName: string,
+  prefix: string
+): { major: number; minor: number } {
   const versionStr = tagName.slice(prefix.length);
   const [major, minor] = versionStr.split('.').map(Number);
   return { major: major || 0, minor: minor || 0 };
@@ -203,7 +220,9 @@ function resolveNextVersion(
   baseRelease?: GitHubRelease
 ): string {
   const publishedReleases = allPrefixReleases.filter((r) => !r.draft);
-  const versions = publishedReleases.map((r) => parseVersion(r.tag_name, prefix));
+  const versions = publishedReleases.map((r) =>
+    parseVersion(r.tag_name, prefix)
+  );
   const highestMajor = versions.reduce((max, v) => Math.max(max, v.major), 0);
 
   if (isHotfix && baseRelease) {
@@ -225,8 +244,11 @@ function parseCommits(raw: CompareCommit[]): Commit[] {
   return raw.map((c) => {
     const titleBreak = c.commit.message.indexOf('\n');
     const title =
-      titleBreak === -1 ? c.commit.message : c.commit.message.slice(0, titleBreak);
-    const body = titleBreak === -1 ? '' : c.commit.message.slice(titleBreak + 1);
+      titleBreak === -1
+        ? c.commit.message
+        : c.commit.message.slice(0, titleBreak);
+    const body =
+      titleBreak === -1 ? '' : c.commit.message.slice(titleBreak + 1);
     return {
       authorTag: c.author?.login || 'unknown',
       title,
@@ -241,7 +263,7 @@ function parseCommits(raw: CompareCommit[]): Commit[] {
 
 const HOTFIX_INFRA_PATTERNS = [
   /^Merge pull request #\d+/i,
-  /^⚠️?\s*hotfix\(release\/.+\):/i,
+  /^hotfix\(release\/.+\):/i,
   /^fix merge conflict/i,
   /^resolve merge conflict/i,
 ];
@@ -289,7 +311,9 @@ function excludeHotfixCommits(
 
   if (normalizedHotfixTitles.size === 0) return commits;
 
-  return commits.filter((c) => !normalizedHotfixTitles.has(normalizeTitle(c.title)));
+  return commits.filter(
+    (c) => !normalizedHotfixTitles.has(normalizeTitle(c.title))
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -326,7 +350,9 @@ async function main() {
     // For hotfix branches (hotfix/release/YYYY-MM-DD-HH-MM), the base is the
     // release targeting the original release branch
     const releaseBranch = commitish.replace(/^hotfix\//, '');
-    console.log(`Hotfix detected — looking for release targeting ${releaseBranch}`);
+    console.log(
+      `Hotfix detected — looking for release targeting ${releaseBranch}`
+    );
     baseRelease = published.find(
       (r) => r.target_commitish === releaseBranch && !isHotfixRelease(r)
     );
@@ -339,26 +365,36 @@ async function main() {
     // Standard flow: most recent published non-hotfix release
     baseRelease = published.find((r) => !isHotfixRelease(r));
     hotfixesBetween = baseRelease
-      ? published.slice(0, published.indexOf(baseRelease)).filter(isHotfixRelease)
+      ? published
+          .slice(0, published.indexOf(baseRelease))
+          .filter(isHotfixRelease)
       : [];
   }
 
   if (!baseRelease) {
-    console.error(`No published non-hotfix release found for prefix "${prefix}"`);
+    console.error(
+      `No published non-hotfix release found for prefix "${prefix}"`
+    );
     process.exit(1);
   }
 
-  console.log(`Base release: ${baseRelease.tag_name} (${baseRelease.target_commitish})`);
+  console.log(
+    `Base release: ${baseRelease.tag_name} (${baseRelease.target_commitish})`
+  );
 
   if (hotfixesBetween.length > 0) {
     console.log(
-      `Skipping ${hotfixesBetween.length} hotfix release(s): ${hotfixesBetween.map((r) => r.tag_name).join(', ')}`
+      `Skipping ${hotfixesBetween.length} hotfix release(s): ${hotfixesBetween
+        .map((r) => r.tag_name)
+        .join(', ')}`
     );
   }
 
   // For hotfix branches, compare against the release branch (not the tag)
   // to get only the cherry-picked commits
-  const compareBase = isHotfixBranch ? baseRelease.target_commitish : baseRelease.tag_name;
+  const compareBase = isHotfixBranch
+    ? baseRelease.target_commitish
+    : baseRelease.tag_name;
   const comparison = await compareCommits(compareBase, commitish);
   console.log(
     `Found ${comparison.total_commits} commits (${comparison.commits.length} returned by API)`
@@ -378,7 +414,9 @@ async function main() {
     allCommits = allCommits.filter((c) => !isHotfixInfraCommit(c.title));
     if (allCommits.length < before) {
       console.log(
-        `Filtered ${before - allCommits.length} hotfix infrastructure commit(s) (merge PRs, conflict fixes)`
+        `Filtered ${
+          before - allCommits.length
+        } hotfix infrastructure commit(s) (merge PRs, conflict fixes)`
       );
     }
   }
@@ -387,12 +425,20 @@ async function main() {
 
   if (commits.length < allCommits.length) {
     console.log(
-      `Excluded ${allCommits.length - commits.length} commit(s) already in hotfix releases`
+      `Excluded ${
+        allCommits.length - commits.length
+      } commit(s) already in hotfix releases`
     );
   }
 
   // Compute version and generate notes
-  const nextVersion = resolveNextVersion(prefixReleases, prefix, commits, isHotfixBranch, baseRelease);
+  const nextVersion = resolveNextVersion(
+    prefixReleases,
+    prefix,
+    commits,
+    isHotfixBranch,
+    baseRelease
+  );
   const tagName = `${prefix}${nextVersion}`;
   const releaseName = tagName;
   const releaseBody = commitsToReleaseNotes(commits);
@@ -413,7 +459,9 @@ async function main() {
 
   let draft: GitHubRelease;
   if (existingDraft) {
-    console.log(`Updating existing draft: ${existingDraft.tag_name} -> ${tagName}`);
+    console.log(
+      `Updating existing draft: ${existingDraft.tag_name} -> ${tagName}`
+    );
     draft = await updateDraftRelease(existingDraft.id, payload);
   } else {
     console.log(`Creating new draft: ${tagName}`);

@@ -1,70 +1,598 @@
-name: Release Preview (Test)
+name: Release Preview
+
+#
+# This workflow creates a release preview for the web-app and integrations applications.
+# It is designed to run on a schedule or be manually dispatched.
+# The workflow performs the following major steps:
+# 1. Creates a release branch.
+# 2. Drafts release notes for both web-app and integrations.
+# 3. Runs a series of checks: linting, TypeScript compilation, and unit tests.
+# 4. Deploys the applications to a staging environment on Vercel.
+# 5. Runs end-to-end (E2E) regression tests using Playwright against the staging environment.
+# 6. Reports the success or failure of the entire process to a Slack channel.
+#
+# The workflow can be run in "test-run" mode, which skips side effects like
+# creating release branches, drafting releases, aliasing domains, and sending notifications
+# to the primary release channel.
+#
+
+# Cancel other related workflows in-progress
+concurrency:
+  group: release-preview-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   workflow_dispatch:
     inputs:
-      commitish:
-        description: 'Override branch to draft from (used by hotfix action)'
-        type: string
-        default: ''
+      # Test Run skips release draft/branch creation/staging aliasing & events, and slacks v4-dev-releases
       test-run:
         description: 'Test Run (skip side effects)'
         type: boolean
         default: false
+      commitish:
+        description: 'Override the branch to draft from (used by hotfix action)'
+        type: string
+        default: ''
+  schedule:
+    # At 07:00UTC on every day-of-week from Monday through Thursday. (https://crontab.guru/#0_7_*_*_1-4)
+    # 11:00pm PST (UTC-8), 2:00am EST (UTC-5), 8:00am CET (UTC+1) : +1 for daylight time
+    - cron: '0 7 * * 1-4'
+    - cron: '0 7 * * 5'
 
+# Environment variables exposed to all jobs
+env:
+  # used in install-dependencies action
+  NODE_AUTH_TOKEN: '${{ secrets.NPM_AUTH_TOKEN }}'
+  # used in `generate` action
+  TESTING_DIR: 'apps/playwright'
+  GITHUB_TOKEN: ${{ secrets.ORG_GITHUB_TOKEN }}
+  GITHUB_BRANCH_PREFIX: 'https://github.com/Frameio/web-app/tree/'
+  RELEASE_NOTES_URL: 'https://github.com/Frameio/web-app/releases/'
+  ACTION_RUN_URL: 'https://github.com/Frameio/web-app/actions/runs/${{ github.run_id }}'
+  DD_WEB_RELEASES_URL: 'https://app.datadoghq.com/dashboard/uui-xtd-yji'
+  SLACK_CHANNEL: ${{ github.event.inputs.test-run == 'true' && 'v4-dev-releases' || 'ops-releases' }}
+  RELEASE_VERSION: ${{ github.sha }}
 permissions:
+  id-token: write
   contents: write
+  pull-requests: write
 
 jobs:
+  # Creates a new release branch based on the current HEAD.
+  # The branch name is outputted for subsequent jobs.
   release-branch:
     name: Create Release Branch
     runs-on: ubuntu-latest
     outputs:
-      branch_name: ${{ steps.branch.outputs.branch_name }}
+      branch_name: ${{ steps.get-branch-name.outputs.branch_name }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@v6
 
-      - name: Create Release Branch
-        if: ${{ github.event.inputs.commitish == '' && github.event.inputs.test-run != 'true' }}
+      - name: Create Branch
+        # Create new release branch unless opted out (hotfixing draft release branch)
+        if: ${{github.event.inputs.test-run != 'true'}}
+        shell: bash
         run: |
-          BRANCH="release/$(date -u +%Y-%m-%d-%H-%M)"
-          echo "Creating release branch: $BRANCH"
-          git checkout -b "$BRANCH"
-          git push origin "$BRANCH"
+          sh scripts/release-branch/rb.sh
 
       - name: Get Branch Name
+        # Run regardless of whether create branch ran
         if: ${{ always() }}
-        id: branch
+        id: get-branch-name
+        shell: bash
         run: |
           echo "branch_name=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
 
-  draft-release:
+  # Drafts release notes for both the web-app and integrations packages.
+  # Uses a custom script that correctly handles hotfix releases by skipping
+  # them when determining the base, ensuring complete notes and correct versioning.
+  release-preview:
     needs: [release-branch]
     name: Draft Release
     runs-on: ubuntu-latest
+    outputs:
+      web_app_draft_tag: ${{ steps.draft-web-app-release.outputs.tag_name ||  'no-release-tag-generated' }}
+      integrations_draft_tag: ${{ steps.draft-integrations-release.outputs.tag_name ||  'no-release-tag-generated' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+      - name: Use latest release scripts from main
+        run: git checkout origin/main -- scripts/release-draft/
 
       - name: Install Dependencies
-        run: npm install --no-audit
+        uses: ./.github/actions/install-dependencies
 
-      - name: Draft web-app Release
-        id: draft-web-app
-        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish || needs.release-branch.outputs.branch_name || github.ref_name }}"
+      - name: Draft or Update web-app Release
+        if: ${{github.event.inputs.test-run != 'true'}}
+        id: draft-web-app-release
+        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{github.event.inputs.commitish || needs.release-branch.outputs.branch_name || github.ref_name}}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_OWNER: ${{ github.repository_owner }}
-          GITHUB_REPO: ${{ github.event.repository.name }}
 
-      - name: Summary
+      - name: Check if web-app release tag is published
+        if: ${{github.event.inputs.test-run != 'true'}}
+        id: check-web-app-tag
         run: |
-          echo "### Draft Release" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag:** ${{ steps.draft-web-app.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
+          DRAFT_TAG="${{ steps.draft-web-app-release.outputs.tag_name }}"
+          if [ -n "$DRAFT_TAG" ]; then
+            echo "Draft web-app tag would be: $DRAFT_TAG"
+            if [ -n "$(git ls-remote --tags origin "$DRAFT_TAG")" ]; then
+              echo "Tag $DRAFT_TAG already exists on remote - release would conflict"
+              exit 1
+            else
+              echo "Tag $DRAFT_TAG does not exist on remote - safe to publish"
+            fi
+          else
+            echo "No draft tag generated - safe to proceed"
+          fi
+
+      - name: Draft or Update integrations Release
+        if: ${{github.event.inputs.test-run != 'true'}}
+        id: draft-integrations-release
+        run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-integrations@" --commitish "${{github.event.inputs.commitish || needs.release-branch.outputs.branch_name || github.ref_name}}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if integrations release tag is published
+        if: ${{github.event.inputs.test-run != 'true'}}
+        id: check-integrations-tag
+        run: |
+          DRAFT_TAG="${{ steps.draft-integrations-release.outputs.tag_name }}"
+          if [ -n "$DRAFT_TAG" ]; then
+            echo "Draft integrations tag would be: $DRAFT_TAG"
+            if [ -n "$(git ls-remote --tags origin "$DRAFT_TAG")" ]; then
+              echo "Tag $DRAFT_TAG already exists on remote - release would conflict"
+              exit 1
+            else
+              echo "Tag $DRAFT_TAG does not exist on remote - safe to publish"
+            fi
+          else
+            echo "No draft tag generated - safe to proceed"
+          fi
+
+  # This job checks out the code and generates dynamic schemas.
+  # This is a prerequisite for jobs like `typescript` and `unit-tests`.
+  generate:
+    name: Generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 32
+    env:
+      APOLLO_KEY: ${{ secrets.APOLLO_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Generate Dynamic Schemas
+        uses: ./.github/actions/generate
+        with:
+          apollo-key: ${{ secrets.APOLLO_KEY }}
+
+  # Performs static type checking on the codebase using TypeScript.
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest-4-cores
+    timeout-minutes: 24
+    needs: [generate]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Run Setup
+        uses: ./.github/actions/setup
+        with:
+          apollo-key: ${{ secrets.APOLLO_KEY }}
+  # Runs the linter to check for code style and quality issues.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    needs: [generate]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Run Setup
+        uses: ./.github/actions/setup
+        with:
+          apollo-key: ${{ secrets.APOLLO_KEY }}
+      - name: Linter Check
+        run: yarn run lint
+        env:
+          TURBO_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          TURBO_TEAM: frameio
+
+  # Executes unit tests using Jest to ensure code correctness.
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest-4-cores
+    timeout-minutes: 32
+    needs: [generate]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Report Runner Parameters
+        shell: bash
+        run: node -p 'os.cpus()'
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Run Setup
+        uses: ./.github/actions/setup
+        with:
+          apollo-key: ${{ secrets.APOLLO_KEY }}
+      - name: Run Unit Tests (Jest)
+        uses: ./.github/actions/tests-jest-unit
+        env:
+          TURBO_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          TURBO_TEAM: frameio
+
+  # Build iframe-host.html and deploy to S3
+  generate-iframe-host:
+    name: Generate iframe-host.html
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [generate]
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+
+      - name: Run Setup
+        uses: ./.github/actions/setup
+        with:
+          apollo-key: ${{ secrets.APOLLO_KEY }}
+      - name: Generate iframe-host.html
+        shell: bash
+        env:
+          CONFIG_ENV: STAGING_APP_SERVER
+          RELEASE_VERSION: ${{ env.RELEASE_VERSION }}
+        run: yarn build:frameio-interactive-media-host
+
+      - name: Upload iframe-host.html
+        with:
+          release-version: ${{ env.RELEASE_VERSION }}
+          environment: 'staging'
+        uses: ./.github/actions/iframe-host-deploy
+
+  # Builds the main web application (next.staging.frame.io) and creates a Vercel deployment preview.
+  # It outputs the deployment URL for other jobs to use.
+  deploy-staging-build:
+    name: Build next.staging.frame.io
+    runs-on: ubuntu-latest-4-cores
+    timeout-minutes: 30
+    outputs:
+      # prettier-ignore
+      staging-deployment-url: ${{ steps.staging-output-step.outputs.staging-deployment-url }}
+      deployment-started-at: ${{ steps.deployment-started-at.outputs.timestamp }}
+      deployment-finished-at: ${{ steps.deployment-finished-at.outputs.timestamp}}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deployment Start Time
+        id: deployment-started-at
+        uses: ./.github/actions/timestamp
+
+      # Create preview deployment on Vercel
+      - name: Create Vercel deployment
+        id: create-vercel-staging-deployment
+        uses: ./.github/actions/vercel-deploy
+        with:
+          config-env: STAGING_APP_SERVER
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_WEB_APP_PROJECT_ID }}
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+
+      - id: staging-log-deployment
+        run: >
+          echo "Created Vercel deployment ${{ steps.create-vercel-staging-deployment.outputs.deployment-url }}"
+
+      - id: staging-output-step
+        run: >
+          echo "staging-deployment-url=${{ steps.create-vercel-staging-deployment.outputs.deployment-url }}" >> $GITHUB_OUTPUT
+
+      - name: Deployment Finish Time
+        id: deployment-finished-at
+        uses: ./.github/actions/timestamp
+
+  # Aliases the Vercel preview deployment to the official staging domain (next.staging.frame.io).
+  # This makes the deployment accessible at a consistent URL.
+  # This step is skipped on test runs.
+  alias-staging:
+    name: Deploy next.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-staging-build]
+    # Marks deployment for e2e regression tests
+    environment:
+      name: Staging - web-app
+      url: https://next.staging.frame.io
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Alias domain
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        uses: ./.github/actions/vercel-alias-domain
+        with:
+          domain: next.staging.frame.io
+          # prettier-ignore
+          deployment-url: ${{ needs.deploy-staging-build.outputs.staging-deployment-url }}
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_WEB_APP_PROJECT_ID }}
+
+  # Performs post-deployment steps for the main web app.
+  # This includes a health check of the deployed service, creating a Sentry release,
+  # and emitting a deployment event to Datadog.
+  postdeploy-staging:
+    name: Post deploy steps
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-staging-build, alias-staging]
+    steps:
+      - name: Check the deployed service URL
+        uses: jtalk/url-health-check-action@v4
+        with:
+          url: https://next.staging.frame.io/api/checks/health
+
+      # Sentry requires checkout to track commits
+      - uses: actions/checkout@v6
+
+      - name: Create sentry release
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        uses: getsentry/action-release@v1
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+        with:
+          environment: 'staging'
+
+      - name: Emit Datadog deployment event
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        uses: ./.github/actions/datadog-deploy
+        env:
+          DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
+        with:
+          environment: 'staging'
+          canonical-deployment-url: ${{ needs.deploy-staging-build.outputs.staging-deployment-url }}
+          deployment-started-at: ${{ needs.deploy-staging-build.outputs.deployment-started-at}}
+          deployment-finished-at: ${{ needs.deploy-staging-build.outputs.deployment-finished-at}}
+
+  # Builds the integrations application (integrations.staging.frame.io) and creates a Vercel deployment preview.
+  deploy-integrations-staging-build:
+    name: Build integrations.staging.frame.io
+    runs-on: ubuntu-latest-4-cores
+    timeout-minutes: 30
+    outputs:
+      # prettier-ignore
+      staging-deployment-url: ${{ steps.integrations-staging-output-step.outputs.staging-deployment-url }}
+      deployment-started-at: ${{ steps.deployment-started-at.outputs.timestamp }}
+      deployment-finished-at: ${{ steps.deployment-finished-at.outputs.timestamp}}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deployment Start Time
+        id: deployment-started-at
+        uses: ./.github/actions/timestamp
+
+      # Create preview deployment on Vercel
+      - name: Create Vercel deployment
+        id: create-vercel-integrations-staging-deployment
+        uses: ./.github/actions/vercel-deploy
+        with:
+          config-env: STAGING_INTEGRATIONS_SERVER
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_INTEGRATIONS_APP_PROJECT_ID }}
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+
+      - id: integrations-staging-log-deployment
+        run: >
+          echo "Created Vercel deployment ${{ steps.create-vercel-integrations-staging-deployment.outputs.deployment-url }}"
+
+      - id: integrations-staging-output-step
+        run: >
+          echo "staging-deployment-url=${{ steps.create-vercel-integrations-staging-deployment.outputs.deployment-url }}" >> $GITHUB_OUTPUT
+
+      - name: Deployment Finish Time
+        id: deployment-finished-at
+        uses: ./.github/actions/timestamp
+
+  # Aliases the Vercel preview deployment for the integrations app to its staging domain.
+  # This step is skipped on test runs.
+  alias-integrations-staging:
+    name: Deploy integrations.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-integrations-staging-build]
+    # Marks deployment for e2e regression tests
+    environment:
+      name: Staging - integrations
+      url: https://integrations.staging.frame.io
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Alias domain
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        uses: ./.github/actions/vercel-alias-domain
+        with:
+          domain: integrations.staging.frame.io
+          # prettier-ignore
+          deployment-url: ${{ needs.deploy-integrations-staging-build.outputs.staging-deployment-url }}
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_INTEGRATIONS_APP_PROJECT_ID }}
+
+  # Performs post-deployment steps for the integrations app, similar to the main web app.
+  # Includes a health check and a Datadog deployment event.
+  postdeploy-integrations-staging:
+    name: Post deploy steps for integrations.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-integrations-staging-build, alias-integrations-staging]
+    steps:
+      - name: Check the deployed service URL
+        uses: jtalk/url-health-check-action@v4
+        with:
+          url: https://integrations.staging.frame.io/api/checks/health
+
+      - uses: actions/checkout@v6 # datadog-deploy requires checkout to use local actions
+
+      - name: Emit Datadog deployment event
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        uses: ./.github/actions/datadog-deploy
+        env:
+          DATADOG_API_KEY: ${{ secrets.DD_API_KEY }}
+        with:
+          environment: 'staging'
+          canonical-deployment-url: ${{ needs.deploy-integrations-staging-build.outputs.staging-deployment-url }}
+          deployment-started-at: ${{ needs.deploy-integrations-staging-build.outputs.deployment-started-at}}
+          deployment-finished-at: ${{ needs.deploy-integrations-staging-build.outputs.deployment-finished-at}}
+          service: integrations
+
+  playwright-matrix:
+    name: Generate Playwright Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.playwright-matrix.outputs.matrix }}
+    env:
+      APOLLO_KEY: ${{ secrets.APOLLO_KEY }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Generate Playwright Matrix
+        id: playwright-matrix
+        uses: ./.github/actions/playwright-matrix
+
+  # Runs the Playwright end-to-end (E2E) regression test suite against the staging environment.
+  # The tests are sharded to run in parallel across multiple runners.
+  playwright-run:
+    name: Run Staging Regression Tests
+    needs: [generate, postdeploy-staging, playwright-matrix]
+    if: success()
+    timeout-minutes: 15
+    # The type of runner that the job will run on
+    runs-on: linux-amd64-16cpu
+    # We're running inside of the container b/c the self-hosted runners do not have access to yarn
+    # without installing it or using corepack.
+    container:
+      image: mcr.microsoft.com/playwright:v1.58.2-jammy
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.playwright-matrix.outputs.matrix) }}
+    env:
+      APOLLO_KEY: ${{ secrets.APOLLO_KEY }}
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v6
+
+      - name: Run Playwright tests
+        uses: ./.github/actions/playwright
+        with:
+          dd-key: ${{secrets.DD_API_KEY}}
+          mailslurp-key: ${{secrets.MAILSLURP_E2E_API_KEY}}
+          test-directory: ${{env.TESTING_DIR}}
+          blob-report-name: blob-report-${{ matrix.shard-index }}
+          cli: PLAYWRIGHT_REUSE_ACCOUNT=${{vars.PLAYWRIGHT_REUSE_ACCOUNT}} E2E_SEARCH_TESTS=${{secrets.E2E_SEARCH_TESTS}} yarn playwright:staging --retries=2 --shard="${{ matrix.shard-index }}/${{ matrix.total-shards }}"
+          dd-env: 'staging'
+          upload-report: 'true'
+
+  # Gathers the results from the parallel Playwright test runs and generates a consolidated report.
+  # The report is then uploaded and a summary is prepared for Slack.
+  playwright-reports:
+    env:
+      REPORT_PATH: ${{ github.event.repository.name }}/run-${{ github.run_id }}-${{ github.run_number }}
+    name: Generate E2E Reports
+    needs: [playwright-run]
+    if: ${{success() || failure()}}
+    runs-on: ubuntu-latest
+    outputs:
+      short-e2e-report: ${{ steps.merge-reports.outputs.short-report }}
+      hosted-e2e-report: ${{ steps.merge-reports.outputs.report-url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Send Reports
+        if: success() || failure()
+        id: merge-reports
+        uses: ./.github/actions/playwright-report
+        with:
+          test-directory: ${{env.TESTING_DIR}}
+          report-path: ${{github.event.repository.name }}/run-${{ github.run_id }}-${{ github.run_number}}-${{ github.run_attempt }}
+          slack-token: ${{ secrets.E2E_TEST_NOTIFY_BOT }}
+
+  # Reports the overall status of the release preview workflow to a dedicated Slack channel.
+  # The message includes the status of each job and links to the release draft and E2E reports.
+  slack-report:
+    name: Report Job Status
+    if: ${{ always() }}
+    env:
+      FRIDAY_MESSAGE: '*Happy Friday!* :cheers: Friday cuts are generally not deployed to production. Monday’s cut will update the draft and include these commits.'
+      PASS: ${{ github.event.schedule == '0 7 * * 5' &&  ':blob-sign-yes:' || '✅' }}
+      FAIL: ${{ github.event.schedule == '0 7 * * 5' && ':blob-sign-naw:' || '❌' }}
+      WARN: ${{ github.event.schedule == '0 7 * * 5' &&  ':blob_help:' || '⚠️' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [release-branch, release-preview, typescript, lint, unit-tests, generate-iframe-host, deploy-staging-build, postdeploy-staging, playwright-run, playwright-reports]
+    steps:
+      - name: 'Slack Deployment to #ops-releases'
+        # https://github.com/rtCamp/action-slack-notify
+        uses: rtCamp/action-slack-notify@v2
+        env:
+          SLACK_WEBHOOK: ${{ secrets.RELEASES_SLACK_WEBHOOK }}
+          SLACK_ICON: https://avatars.githubusercontent.com/u/8882715?s=512&v=4
+          SLACK_LINK_NAMES: ${{ github.event.inputs.test-run != 'true' }}
+          SLACK_USERNAME: 'Web Release Preview'
+          SLACK_CHANNEL: ${{ env.SLACK_CHANNEL }}
+          SLACK_COLOR:
+            ${{ needs.release-branch.result == 'success' && needs.release-preview.result == 'success' && needs.typescript.result == 'success' && needs.lint.result == 'success' && needs.unit-tests.result == 'success' &&
+            needs.deploy-staging-build.result == 'success' && needs.postdeploy-staging.result == 'success' && (needs.playwright-run.result == 'success' && 'good' || '#ffff00') || 'failure' }}
+          SLACK_TITLE: 'Web Release Preview : ${{ needs.release-preview.outputs.web_app_draft_tag }}'
+          SLACK_MESSAGE: |
+            ${{ github.event.schedule == '0 7 * * 5' &&  env.FRIDAY_MESSAGE || format('*To deploy <{0}|{1}> follow the <{2}|Web App (v4) Release Hub>*', env.RELEASE_NOTES_URL, needs.release-preview.outputs.web_app_draft_tag, env.DD_WEB_RELEASES_URL)}}
+
+            *<${{ env.ACTION_RUN_URL }}|Release Preview Job>*:
+            - ${{ needs.release-branch.result == 'success' && env.PASS || env.FAIL }} *Release Branch*: ${{ needs.release-branch.result }} - <${{ env.GITHUB_BRANCH_PREFIX }}${{ needs.release-branch.outputs.branch_name}}|${{ needs.release-branch.outputs.branch_name }}>
+            - ${{ needs.release-preview.result == 'success' && env.PASS || env.FAIL }} *Draft Release*: ${{ needs.release-preview.result }} - <${{ env.RELEASE_NOTES_URL }}|${{ needs.release-preview.outputs.web_app_draft_tag }} (view commits)>
+            - ${{ needs.typescript.result == 'success' && env.PASS || env.FAIL }} *TypeScript*: ${{ needs.typescript.result }}
+            - ${{ needs.lint.result == 'success' && env.PASS || env.FAIL  }} *Lint*: ${{ needs.lint.result }}
+            - ${{ needs.unit-tests.result == 'success' && env.PASS || env.FAIL  }} *Unit Tests*: ${{ needs.unit-tests.result }}
+            - ${{ needs.generate-iframe-host.result == 'success' && env.PASS || env.FAIL  }} *Iframe Host Deploy*: ${{ needs.generate-iframe-host.result }}
+            - ${{ needs.deploy-staging-build.result == 'success' && env.PASS || env.FAIL  }} *Staging Deploy*: ${{ needs.deploy-staging-build.result }} - <https://next.staging.frame.io|next.staging.frame.io>
+            - ${{ needs.postdeploy-staging.result == 'success' && env.PASS || env.FAIL  }} *Staging Check*: ${{ needs.postdeploy-staging.result }}
+            - ${{ needs.playwright-run.result == 'success' && env.PASS || env.WARN  }} *E2E Tests*: ${{needs.playwright-reports.outputs.short-e2e-report || needs.playwright-run.result}}
+            - ${{ needs.playwright-reports.result == 'success' && env.PASS || env.WARN  }} *E2E Report*: ${{needs.playwright-reports.result}} <${{needs.playwright-reports.outputs.hosted-e2e-report}}|view full e2e report>
+          SLACK_FOOTER: |
+            Web App Release Preview: ${{ needs.release-preview.outputs.web_app_draft_tag }}
+            Integrations Release Preview: ${{ needs.release-preview.outputs.integrations_draft_tag }}
+
+          MSG_MINIMAL: commit,ref
+
+  # This job updates the full dependency cache to speed up future workflow runs.
+  update-full-cache:
+    name: Update Full Cache
+    runs-on: linux-amd64-16cpu
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Dependencies
+        uses: ./.github/actions/install-dependencies
+        with:
+          update-full-cache: true
