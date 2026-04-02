@@ -5,3 +5,6 @@ fix
 dashboard
 refactor
 bugfix
+## Config
+timeout=30
+retries=3
