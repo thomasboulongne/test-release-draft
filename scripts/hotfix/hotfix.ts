@@ -24,6 +24,7 @@
 
 import { execSync } from 'child_process';
 import { appendFileSync } from 'fs';
+import { parseConflictedFiles, parseHotfixArgs } from './hotfix-logic';
 
 const OWNER = process.env.GITHUB_OWNER || 'Frameio';
 const REPO = process.env.GITHUB_REPO || 'web-app';
@@ -33,34 +34,14 @@ const REPO = process.env.GITHUB_REPO || 'web-app';
 // ---------------------------------------------------------------------------
 
 function parseArgs() {
-  const args = process.argv.slice(2);
-  let releaseTag = '';
-  let commits: string[] = [];
-  let skipReleasePreview = false;
-  let dryRun = false;
-
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === '--release-tag' && args[i + 1]) {
-      releaseTag = args[i + 1];
-      i += 1;
-    } else if (args[i] === '--commits' && args[i + 1]) {
-      commits = args[i + 1].split(',').map((s) => s.trim()).filter(Boolean);
-      i += 1;
-    } else if (args[i] === '--skip-release-preview') {
-      skipReleasePreview = true;
-    } else if (args[i] === '--dry-run') {
-      dryRun = true;
-    }
-  }
-
-  if (!releaseTag || commits.length === 0) {
+  const result = parseHotfixArgs(process.argv.slice(2));
+  if (!result) {
     console.error(
       'Usage: --release-tag <tag> --commits <sha1,sha2,...> [--skip-release-preview] [--dry-run]'
     );
     process.exit(1);
   }
-
-  return { releaseTag, commits, skipReleasePreview, dryRun };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,7 +80,9 @@ type GitHubRelease = {
 };
 
 async function getReleaseByTag(tag: string): Promise<GitHubRelease> {
-  return ghApi(`/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag)}`);
+  return ghApi(
+    `/repos/${OWNER}/${REPO}/releases/tags/${encodeURIComponent(tag)}`
+  );
 }
 
 async function createPullRequest(
@@ -145,15 +128,14 @@ function git(cmd: string): string {
 }
 
 function getCommitTitle(sha: string): string {
-  return execSync(`git show -s --format=%s ${sha}`, { encoding: 'utf-8' }).trim();
+  return execSync(`git show -s --format=%s ${sha}`, {
+    encoding: 'utf-8',
+  }).trim();
 }
 
 function getConflictedFiles(): string[] {
   const status = execSync('git status --porcelain', { encoding: 'utf-8' });
-  return status
-    .split('\n')
-    .filter((l) => /^(UU|AA|DD|AU|UA|DU|UD)\s/.test(l))
-    .map((l) => l.slice(3).trim());
+  return parseConflictedFiles(status);
 }
 
 /**
@@ -174,10 +156,9 @@ function tryCherryPick(sha: string): boolean {
 }
 
 function validateCommit(sha: string, targetBranch: string): void {
-  const onMain = execSync(
-    `git branch -r origin/main --contains ${sha}`,
-    { encoding: 'utf-8' }
-  ).trim();
+  const onMain = execSync(`git branch -r origin/main --contains ${sha}`, {
+    encoding: 'utf-8',
+  }).trim();
   if (!onMain) {
     throw new Error(`Commit ${sha} is not on main`);
   }
@@ -220,7 +201,9 @@ async function cleanupBranches(branches: string[]) {
       git(`push origin --delete ${branch}`);
       console.log(`  Deleted remote branch: ${branch}`);
     } catch {
-      console.log(`  Could not delete remote branch: ${branch} (may not exist)`);
+      console.log(
+        `  Could not delete remote branch: ${branch} (may not exist)`
+      );
     }
   }
 }
@@ -285,8 +268,18 @@ async function main() {
   git(`checkout -b ${hotfixBranch}`);
 
   const createdBranches: string[] = [hotfixBranch];
-  const conflictPRs: { sha: string; pr: { number: number; html_url: string }; files: string[] }[] = [];
+  const conflictPRs: {
+    sha: string;
+    pr: { number: number; html_url: string };
+    files: string[];
+  }[] = [];
   let needsResolution = false;
+  let pendingConflict: {
+    stagedBranch: string;
+    sha: string;
+    title: string;
+    conflictFiles: string[];
+  } | null = null;
 
   try {
     // 5. Cherry-pick each commit directly onto the hotfix branch
@@ -299,31 +292,39 @@ async function main() {
 
       if (clean) {
         console.log(`   ✓ Applied cleanly`);
-        continue;
+      } else {
+        // -- Conflict path: abort, use a staged branch + PR for resolution --
+        console.log(`   ⚠️  Conflict detected`);
+        const conflictFiles = getConflictedFiles();
+        console.log(`   Conflicted file(s):`);
+        for (const f of conflictFiles) console.log(`      - ${f}`);
+
+        git('cherry-pick --abort');
+
+        const stagedBranch = `staged/${sha}/${releaseBranch}`;
+        createdBranches.push(stagedBranch);
+
+        try {
+          git(`push origin --delete ${stagedBranch}`);
+        } catch {
+          /* doesn't exist — expected */
+        }
+
+        git(`checkout -b ${stagedBranch}`);
+
+        git(`cherry-pick --no-commit ${sha}`);
+        git('add -A');
+        git(`commit -m "${title}"`);
+
+        git(`push origin ${stagedBranch}`);
+
+        pendingConflict = { stagedBranch, sha, title, conflictFiles };
+        break;
       }
+    }
 
-      // -- Conflict path: abort, use a staged branch + PR for resolution --
-      console.log(`   ⚠️  Conflict detected`);
-      const conflictFiles = getConflictedFiles();
-      console.log(`   Conflicted file(s):`);
-      for (const f of conflictFiles) console.log(`      - ${f}`);
-
-      git('cherry-pick --abort');
-
-      const stagedBranch = `staged/${sha}/${releaseBranch}`;
-      createdBranches.push(stagedBranch);
-
-      try {
-        git(`push origin --delete ${stagedBranch}`);
-      } catch { /* doesn't exist — expected */ }
-
-      git(`checkout -b ${stagedBranch}`);
-
-      git(`cherry-pick --no-commit ${sha}`);
-      git('add -A');
-      git(`commit -m "${title}"`);
-
-      git(`push origin ${stagedBranch}`);
+    if (pendingConflict) {
+      const { stagedBranch, sha, title, conflictFiles } = pendingConflict;
 
       console.log('   📝 Creating PR for conflict resolution...');
       const pr = await createPullRequest(
@@ -342,35 +343,36 @@ async function main() {
       );
       console.log(`   PR #${pr.number}: ${pr.html_url}`);
 
-      await addPRComment(pr.number, [
-        '## ⚠️ Cherry-pick conflict — manual resolution required',
-        '',
-        `The cherry-pick of \`${sha}\` onto \`${hotfixBranch}\` produced merge conflicts.`,
-        'The conflict markers have been committed so the PR could be created.',
-        '',
-        '**Conflicted files:**',
-        ...conflictFiles.map((f) => `- \`${f}\``),
-        '',
-        '**To resolve:**',
-        '1. Check out this branch locally, or use GitHub\'s web editor',
-        '2. Search for `<<<<<<<` conflict markers in the files listed above',
-        '3. Resolve each conflict and remove the markers',
-        '4. Commit your resolution and **squash merge** the PR',
-        '',
-        'Once merged, the release dashboard will automatically trigger the release preview.',
-      ].join('\n'));
+      await addPRComment(
+        pr.number,
+        [
+          '## ⚠️ Cherry-pick conflict — manual resolution required',
+          '',
+          `The cherry-pick of \`${sha}\` onto \`${hotfixBranch}\` produced merge conflicts.`,
+          'The conflict markers have been committed so the PR could be created.',
+          '',
+          '**Conflicted files:**',
+          ...conflictFiles.map((f) => `- \`${f}\``),
+          '',
+          '**To resolve:**',
+          "1. Check out this branch locally, or use GitHub's web editor",
+          '2. Search for `<<<<<<<` conflict markers in the files listed above',
+          '3. Resolve each conflict and remove the markers',
+          '4. Commit your resolution and **squash merge** the PR',
+          '',
+          'Once merged, the release dashboard will automatically trigger the release preview.',
+        ].join('\n')
+      );
 
       needsResolution = true;
       conflictPRs.push({ sha, pr, files: conflictFiles });
 
       console.log(`   ⚠️  PR left open — engineer must resolve conflicts`);
       console.log(`   Remaining commits skipped (resolve this conflict first)`);
-      break;
     }
 
     // Push the hotfix branch with any clean cherry-picks
     git(`push origin ${hotfixBranch}`);
-
   } catch (err) {
     console.error('\n❌ Hotfix failed:', err);
     setOutput('status', 'failed');
@@ -399,11 +401,17 @@ async function main() {
     summary(`**Branch:** \`${hotfixBranch}\``);
     summary('');
     for (const { sha, pr, files } of conflictPRs) {
-      summary(`**Conflict:** \`${sha.slice(0, 8)}\` — [PR #${pr.number}](${pr.html_url})`);
+      summary(
+        `**Conflict:** \`${sha.slice(0, 8)}\` — [PR #${pr.number}](${
+          pr.html_url
+        })`
+      );
       summary(`Files: ${files.map((f) => `\`${f}\``).join(', ')}`);
     }
     summary('');
-    summary('Resolve the conflicts in the PR(s) above, merge them, then the release dashboard will auto-trigger release-preview.');
+    summary(
+      'Resolve the conflicts in the PR(s) above, merge them, then the release dashboard will auto-trigger release-preview.'
+    );
   } else {
     console.log('\n🎉 Hotfix applied successfully!');
     console.log(`   Branch: ${hotfixBranch}`);

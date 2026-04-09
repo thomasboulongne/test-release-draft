@@ -4,7 +4,8 @@
   "scripts": {
     "release:doctor": "npx tsx --env-file=.env dev-ops/release-doctor-cli/index.ts",
     "release:doctor:test": "npx tsx --env-file=.env dev-ops/release-doctor-cli/index.ts --test-mode",
-    "draft:release": "npx tsx --env-file=.env scripts/release-draft/draft-release.ts"
+    "draft:release": "npx tsx --env-file=.env scripts/release-draft/draft-release.ts",
+    "draft-hotfix-pr": "sh ./scripts/hotfix/cherry-pick-pr.sh"
   },
   "dependencies": {
     "@inquirer/checkbox": "^4.0.4",

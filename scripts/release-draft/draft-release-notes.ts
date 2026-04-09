@@ -80,30 +80,30 @@ export function commitsToReleaseNotes(commits: Array<Commit>) {
   return draft;
 }
 
-function labelFilter(labels) {
-  return (commit) => {
+export function labelFilter(labels: string[]) {
+  return (commit: Commit) => {
     return labels.some((label) => commit.title.toLowerCase().startsWith(label));
   };
 }
 
-function bodyFilter(regex) {
-  return (commit) => {
+export function bodyFilter(regex: RegExp) {
+  return (commit: Commit) => {
     return regex.test(commit.body);
   };
 }
 
-function formatCommit(commit) {
+function formatCommit(commit: Commit) {
   return escapeChars(
     linkJira(prependAuthorToPR(commit.title, commit.authorTag))
   );
 }
 
-function escapeChars(s) {
+export function escapeChars(s: string): string {
   return s.replaceAll('&', `\\&`).replaceAll('_', `\\_`);
 }
 
 // https://github.com/Frameio/web-app/blob/main/.github/release-drafter.yml#L138-L140
-function linkJira(title: string): string {
+export function linkJira(title: string): string {
   const jiraTicketRegex = /([a-zA-Z0-9]+-\d+)/g;
 
   return title.replace(
@@ -112,7 +112,7 @@ function linkJira(title: string): string {
   );
 }
 
-function prependAuthorToPR(title: string, author: string) {
+export function prependAuthorToPR(title: string, author: string) {
   const lastIndex = title.lastIndexOf(' (#');
   if (lastIndex === -1) {
     return `${title} @${author}`;

@@ -1,5 +1,17 @@
 name: Hotfix Release
 
+#
+# Applies one or more hotfix commits from main to a published (or draft)
+# release branch, then triggers release-preview to cut a new release.
+#
+# Happy path: each commit is cherry-picked directly onto the hotfix branch,
+# preserving the original commit message. No intermediate PRs are created.
+#
+# Conflict path: if a cherry-pick has conflicts, the conflicted commit is
+# pushed to a staged branch and a PR is created for manual resolution.
+# Remaining commits are skipped. The workflow exits with status=needs-resolution.
+#
+
 on:
   workflow_dispatch:
     inputs:
@@ -47,12 +59,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install Dependencies
-        run: npm ci
+        uses: ./.github/actions/install-dependencies
 
       - name: Run Hotfix
         id: hotfix

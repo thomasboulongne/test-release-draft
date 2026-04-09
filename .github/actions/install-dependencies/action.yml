@@ -1,0 +1,32 @@
+name: Install Dependencies
+description: Stub for test repo — runs npm install instead of yarn with caching
+
+inputs:
+  registry-url:
+    description: Registry to set up for auth
+    required: false
+    default: 'https://registry.npmjs.org/'
+  is-self-hosted:
+    description: Flag for self-hosted runner adjustments
+    required: false
+    default: ''
+  update-cache:
+    description: Flag to control update of cache
+    required: false
+    default: 'true'
+  update-full-cache:
+    description: Flag to control saving all of yarn cache
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Use Node.js 20
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install
+      shell: bash
+      run: npm install --no-audit

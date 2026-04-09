@@ -1,30 +1,54 @@
-name: Release Preview (Test)
+name: Release Preview
+
+#
+# Sandbox mirror of the production release-preview workflow.
+#
+# The job dependency graph is identical to Frameio/web-app. The release flow
+# (release-branch + release-preview) runs for real. All other jobs (CI checks,
+# deploys, E2E, Slack) are stubbed with mock outputs so the full pipeline
+# completes without external dependencies.
+#
+
+concurrency:
+  group: release-preview-${{ github.ref }}
+  cancel-in-progress: true
 
 on:
   workflow_dispatch:
     inputs:
+      test-run:
+        description: 'Test Run (skip side effects)'
+        type: boolean
+        default: false
       commitish:
-        description: 'Override branch to draft from (used by hotfix action)'
+        description: 'Override the branch to draft from (used by hotfix action)'
         type: string
         default: ''
       cutoff:
         description: 'Cut release from this commit SHA instead of HEAD'
         type: string
         default: ''
-      test-run:
-        description: 'Test Run (skip side effects)'
-        type: boolean
-        default: false
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GITHUB_BRANCH_PREFIX: 'https://github.com/${{ github.repository }}/tree/'
+  RELEASE_NOTES_URL: 'https://github.com/${{ github.repository }}/releases/'
+  ACTION_RUN_URL: 'https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}'
 
 permissions:
+  id-token: write
   contents: write
+  pull-requests: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # REAL: Creates a new release branch based on the current HEAD
+  # ---------------------------------------------------------------------------
   release-branch:
     name: Create Release Branch
     runs-on: ubuntu-latest
     outputs:
-      branch_name: ${{ steps.branch.outputs.branch_name }}
+      branch_name: ${{ steps.get-branch-name.outputs.branch_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,48 +58,320 @@ jobs:
         if: ${{ github.event.inputs.cutoff != '' }}
         run: git checkout ${{ github.event.inputs.cutoff }}
 
-      - name: Create Release Branch
-        if: ${{ github.event.inputs.commitish == '' && github.event.inputs.test-run != 'true' }}
+      - name: Create Branch
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        shell: bash
         run: |
-          BRANCH="release/$(date -u +%Y-%m-%d-%H-%M)"
-          echo "Creating release branch: $BRANCH"
-          git checkout -b "$BRANCH"
-          git push origin "$BRANCH"
+          sh scripts/release-branch/rb.sh
 
       - name: Get Branch Name
         if: ${{ always() }}
-        id: branch
+        id: get-branch-name
+        shell: bash
         run: |
           echo "branch_name=$(git rev-parse --abbrev-ref HEAD)" >> $GITHUB_OUTPUT
 
-  draft-release:
+  # ---------------------------------------------------------------------------
+  # REAL: Drafts release notes using the replacement script
+  # ---------------------------------------------------------------------------
+  release-preview:
     needs: [release-branch]
     name: Draft Release
     runs-on: ubuntu-latest
+    outputs:
+      web_app_draft_tag: ${{ steps.draft-web-app-release.outputs.tag_name || 'no-release-tag-generated' }}
+      integrations_draft_tag: 'no-release-tag-generated'
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Use latest release scripts from main
+        if: ${{ github.event.inputs.test-run != 'true' }}
         run: git checkout origin/main -- scripts/release-draft/
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
       - name: Install Dependencies
-        run: npm install --no-audit
+        uses: ./.github/actions/install-dependencies
 
       - name: Draft web-app Release
-        id: draft-web-app
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        id: draft-web-app-release
         run: npx tsx scripts/release-draft/draft-release.ts --prefix "@frameio/next-web-app@" --commitish "${{ github.event.inputs.commitish || needs.release-branch.outputs.branch_name || github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_OWNER: ${{ github.repository_owner }}
           GITHUB_REPO: ${{ github.event.repository.name }}
 
-      - name: Summary
+      - name: Check if web-app release tag is published
+        if: ${{ github.event.inputs.test-run != 'true' }}
+        id: check-web-app-tag
         run: |
-          echo "### Draft Release" >> $GITHUB_STEP_SUMMARY
-          echo "**Tag:** ${{ steps.draft-web-app.outputs.tag_name }}" >> $GITHUB_STEP_SUMMARY
+          DRAFT_TAG="${{ steps.draft-web-app-release.outputs.tag_name }}"
+          if [ -n "$DRAFT_TAG" ]; then
+            echo "Draft web-app tag would be: $DRAFT_TAG"
+            if [ -n "$(git ls-remote --tags origin "$DRAFT_TAG")" ]; then
+              echo "Tag $DRAFT_TAG already exists on remote - release would conflict"
+              exit 1
+            else
+              echo "Tag $DRAFT_TAG does not exist on remote - safe to publish"
+            fi
+          else
+            echo "No draft tag generated - safe to proceed"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Generate (schema generation)
+  # ---------------------------------------------------------------------------
+  generate:
+    name: Generate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Mock Generate
+        run: echo "::notice::Mock — schema generation skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: TypeScript
+  # ---------------------------------------------------------------------------
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [generate]
+    steps:
+      - name: Mock TypeScript
+        run: echo "::notice::Mock — TypeScript check skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Lint
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [generate]
+    steps:
+      - name: Mock Lint
+        run: echo "::notice::Mock — Lint skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Unit Tests
+  # ---------------------------------------------------------------------------
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [generate]
+    steps:
+      - name: Mock Unit Tests
+        run: echo "::notice::Mock — Unit tests skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: iframe-host
+  # ---------------------------------------------------------------------------
+  generate-iframe-host:
+    name: Generate iframe-host.html
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [generate]
+    steps:
+      - name: Mock iframe-host
+        run: echo "::notice::Mock — iframe-host generation skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Deploy staging (web-app)
+  # ---------------------------------------------------------------------------
+  deploy-staging-build:
+    name: Build next.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      staging-deployment-url: ${{ steps.mock.outputs.staging-deployment-url }}
+      deployment-started-at: ${{ steps.mock.outputs.deployment-started-at }}
+      deployment-finished-at: ${{ steps.mock.outputs.deployment-finished-at }}
+    steps:
+      - name: Mock Vercel deploy
+        id: mock
+        run: |
+          echo "staging-deployment-url=https://mock-staging.example.com" >> $GITHUB_OUTPUT
+          echo "deployment-started-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "deployment-finished-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "::notice::Mock — Vercel staging deploy skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Alias staging
+  # ---------------------------------------------------------------------------
+  alias-staging:
+    name: Deploy next.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-staging-build]
+    steps:
+      - name: Mock alias
+        run: echo "::notice::Mock — Staging alias skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Post-deploy staging
+  # ---------------------------------------------------------------------------
+  postdeploy-staging:
+    name: Post deploy steps
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-staging-build, alias-staging]
+    steps:
+      - name: Mock post-deploy
+        run: echo "::notice::Mock — Post-deploy (health check, Sentry, Datadog) skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Deploy integrations staging
+  # ---------------------------------------------------------------------------
+  deploy-integrations-staging-build:
+    name: Build integrations.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      staging-deployment-url: ${{ steps.mock.outputs.staging-deployment-url }}
+      deployment-started-at: ${{ steps.mock.outputs.deployment-started-at }}
+      deployment-finished-at: ${{ steps.mock.outputs.deployment-finished-at }}
+    steps:
+      - name: Mock Vercel deploy
+        id: mock
+        run: |
+          echo "staging-deployment-url=https://mock-integrations-staging.example.com" >> $GITHUB_OUTPUT
+          echo "deployment-started-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "deployment-finished-at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+          echo "::notice::Mock — Vercel integrations deploy skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Alias integrations staging
+  # ---------------------------------------------------------------------------
+  alias-integrations-staging:
+    name: Deploy integrations.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-integrations-staging-build]
+    steps:
+      - name: Mock alias
+        run: echo "::notice::Mock — Integrations alias skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Post-deploy integrations staging
+  # ---------------------------------------------------------------------------
+  postdeploy-integrations-staging:
+    name: Post deploy steps for integrations.staging.frame.io
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [deploy-integrations-staging-build, alias-integrations-staging]
+    steps:
+      - name: Mock post-deploy
+        run: echo "::notice::Mock — Integrations post-deploy skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Playwright matrix
+  # ---------------------------------------------------------------------------
+  playwright-matrix:
+    name: Generate Playwright Matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.mock.outputs.matrix }}
+    steps:
+      - name: Mock matrix
+        id: mock
+        run: |
+          echo 'matrix=[{"shard-index":1,"total-shards":1}]' >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Playwright run
+  # ---------------------------------------------------------------------------
+  playwright-run:
+    name: Run Staging Regression Tests
+    needs: [generate, postdeploy-staging, playwright-matrix]
+    if: success()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.playwright-matrix.outputs.matrix) }}
+    steps:
+      - name: Mock E2E tests
+        run: |
+          echo "::notice::Mock — E2E shard ${{ matrix.shard-index }}/${{ matrix.total-shards }} skipped (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Playwright reports
+  # ---------------------------------------------------------------------------
+  playwright-reports:
+    name: Generate E2E Reports
+    needs: [playwright-run]
+    if: ${{ success() || failure() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      short-e2e-report: ${{ steps.mock.outputs.short-report }}
+      hosted-e2e-report: ${{ steps.mock.outputs.report-url }}
+    steps:
+      - name: Mock reports
+        id: mock
+        run: |
+          echo "short-report=Mock: All tests passed (stubbed)" >> $GITHUB_OUTPUT
+          echo "report-url=https://example.com/mock-report" >> $GITHUB_OUTPUT
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Slack report → GitHub Step Summary
+  # ---------------------------------------------------------------------------
+  slack-report:
+    name: Report Job Status
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - release-branch
+      - release-preview
+      - typescript
+      - lint
+      - unit-tests
+      - generate-iframe-host
+      - deploy-staging-build
+      - postdeploy-staging
+      - playwright-run
+      - playwright-reports
+    steps:
+      - name: Write Step Summary
+        env:
+          PASS: '✅'
+          FAIL: '❌'
+          WARN: '⚠️'
+        run: |
+          echo "### Release Preview Status (Sandbox)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "| --- | ------ |" >> $GITHUB_STEP_SUMMARY
+          echo "| Release Branch | ${{ needs.release-branch.result == 'success' && '✅' || '❌' }} ${{ needs.release-branch.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Draft Release | ${{ needs.release-preview.result == 'success' && '✅' || '❌' }} ${{ needs.release-preview.result }} — ${{ needs.release-preview.outputs.web_app_draft_tag }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| TypeScript | ${{ needs.typescript.result == 'success' && '✅' || '❌' }} ${{ needs.typescript.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Lint | ${{ needs.lint.result == 'success' && '✅' || '❌' }} ${{ needs.lint.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Unit Tests | ${{ needs.unit-tests.result == 'success' && '✅' || '❌' }} ${{ needs.unit-tests.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Iframe Host | ${{ needs.generate-iframe-host.result == 'success' && '✅' || '❌' }} ${{ needs.generate-iframe-host.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Staging Deploy | ${{ needs.deploy-staging-build.result == 'success' && '✅' || '❌' }} ${{ needs.deploy-staging-build.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Post Deploy | ${{ needs.postdeploy-staging.result == 'success' && '✅' || '❌' }} ${{ needs.postdeploy-staging.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| E2E Tests | ${{ needs.playwright-run.result == 'success' && '✅' || '⚠️' }} ${{ needs.playwright-run.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "| E2E Reports | ${{ needs.playwright-reports.result == 'success' && '✅' || '⚠️' }} ${{ needs.playwright-reports.result }} (mock) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Draft:** [${{ needs.release-preview.outputs.web_app_draft_tag }}](${{ env.RELEASE_NOTES_URL }})" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** [${{ needs.release-branch.outputs.branch_name }}](${{ env.GITHUB_BRANCH_PREFIX }}${{ needs.release-branch.outputs.branch_name }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "::notice::Mock — Slack notification replaced with Step Summary (sandbox)"
+
+  # ---------------------------------------------------------------------------
+  # MOCK: Update full cache
+  # ---------------------------------------------------------------------------
+  update-full-cache:
+    name: Update Full Cache
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Mock cache update
+        run: echo "::notice::Mock — Full cache update skipped (sandbox)"
