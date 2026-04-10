@@ -271,6 +271,8 @@ jobs:
             "chore: standardize error codes across all API endpoints"
           )
 
+          mkdir -p seed
+
           COUNT=${{ inputs.count }}
           TOTAL=${#MESSAGES[@]}
 
